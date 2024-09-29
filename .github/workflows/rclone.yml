@@ -116,22 +116,26 @@ jobs:
         env:
           RCLONE_DEST: ${{ needs.pre_sync.outputs.rclone_dest }}
           MESSAGE_ID: ${{ needs.discord_notice.outputs.message_id }}
+          ISSUE_NUMB: ${{ github.event.issue.number }}
         run: |
           rclone_dest=$(echo "${RCLONE_DEST}" | xargs)
 
           # remove carriage return in rclone_dest
           rclone_dest=$(echo "$rclone_dest" | tr -d '\r')
           ipa_path=$(echo "${rclone_dest}/${IPA_FILE}" | xargs)
-          rclone hashsum md5 --output-file=checksum.md5 ${ipa_path}
-          rm -rf file.info; rclone size --json ${ipa_path} > file.info 
+          rclone hashsum md5 --output-file=${ISSUE_NUMB}-checksum.md5 ${ipa_path}
+          rm -rf file.info; rclone size --json ${ipa_path} > ${ISSUE_NUMB}-file.info
 
           # get ipa file size as KB
           ipa_size=$(du -k ${IPA_FILE} | awk '{print $1}')
           ipa_size=$(echo "$ipa_size" | xargs)
 
-          echo "MD5_CHECKSUM=$(cat checksum.md5)" >> "$GITHUB_OUTPUT"
-          echo "IPA_SIZE=$(jq -r '.id' file.info)" >> "$GITHUB_OUTPUT"
+          echo "MD5_CHECKSUM=$(cat ${ISSUE_NUMB}-checksum.md5)" >> "$GITHUB_OUTPUT"
+          echo "IPA_SIZE=$(jq -r '.id' ${ISSUE_NUMB}-file.info)" >> "$GITHUB_OUTPUT"
           echo "IPA_FILE=${IPA_FILE}" >> "$GITHUB_OUTPUT"
+
+          # remove checksum and file.info
+          rm -rf ${ISSUE_NUMB}-checksum.md5 ${ISSUE_NUMB}-file.info
 
       - id: storage_log
         name: Archive rclone log
@@ -156,8 +160,8 @@ jobs:
           gh issue edit "$ISSUE_NUMB" --remove-label "InProgress"
 
           # Add comment to issue
-          echo -e "| Result | Sync completed successfully. |\n| -- | -- |\n| File size | ${IPA_SIZE} KB |\n| File name | ${IPA_FILE} |\n| Checksum | md5:${MD5_CHECKSUM} |" > issue.body
-          gh issue comment "$ISSUE_NUMB" -F issue.body
+          echo -e "| Result | Sync completed successfully. |\n| -- | -- |\n| File size | ${IPA_SIZE} KB |\n| File name | ${IPA_FILE} |\n| Checksum | md5:${MD5_CHECKSUM} |" > ${ISSUE_NUMB}-issue.body
+          gh issue comment "$ISSUE_NUMB" -F ${ISSUE_NUMB}-issue.body
 
           # close issue
           gh issue edit "$ISSUE_NUMB" --add-label "Completed"
@@ -174,6 +178,9 @@ jobs:
 
           # Send message to Discord
           curl -X PATCH -H "Content-Type: application/json" -d "${message_data}" "${URL}"
+
+          # remove issue.body
+          rm -rf ${ISSUE_NUMB}-issue.body
 
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -202,7 +209,7 @@ jobs:
       - name: Add Comment to issue
         run: |
           # Add comment to issue
-          gh issue comment "$ISSUE_NUMB" -F rclone.out
+          gh issue comment "$ISSUE_NUMB" -F ${ISSUE_NUMB}-rclone.out
 
           # Add label to issue
           gh issue edit "$ISSUE_NUMB" --add-label "Failed"
@@ -211,7 +218,7 @@ jobs:
           gh issue edit "$ISSUE_NUMB" --remove-label "InProgress"
 
           # error is first line of rclone.out
-          ERR_MESSAGE=$(head -n 1 rclone.out)
+          ERR_MESSAGE=$(head -n 1 ${ISSUE_NUMB}-rclone.out)
 
           # Post to Discord
           RUNNING_TIME=$(echo "$(date +%s) - $(date -d "$START_TIME" +%s)" | bc)
@@ -224,6 +231,9 @@ jobs:
 
           # Send message to Discord
           curl -X PATCH -H "Content-Type: application/json" -d "${message_data}" "${URL}"
+
+          # remove rclone.out
+          rm -rf ${ISSUE_NUMB}-rclone.out
 
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -247,6 +257,7 @@ jobs:
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_NUMB: ${{ github.event.issue.number }}
         run: |
           APP_NAME=$(echo "$ISSUE_TITLE" | grep -oP '(?<=Request Premier for ).*(?=-)')
           APP_NAME=$(echo "$APP_NAME" | sed "s/'/\\\'/g" | xargs)
@@ -259,16 +270,19 @@ jobs:
           echo "$MESSAGE_DATA"
 
           # Send message to Discord
-          curl -X POST -H "Content-Type: application/json" -d "${MESSAGE_DATA}" "${DISCORD_WEBHOOK}?wait=true" > response.json
+          curl -X POST -H "Content-Type: application/json" -d "${MESSAGE_DATA}" "${DISCORD_WEBHOOK}?wait=true" > ${ISSUE_NUMB}-response.json
 
           # Print the response
-          cat response.json
+          cat ${ISSUE_NUMB}-response.json
 
           # Get the message id from the response
-          MESSAGE_ID=$(jq -r '.id' response.json)
+          MESSAGE_ID=$(jq -r '.id' ${ISSUE_NUMB}-response.json)
 
           # Set the message id as an output variable
           echo "MESSAGE_ID=${MESSAGE_ID}" >> "$GITHUB_OUTPUT"
 
           # Add current timestamp to GITHUB_OUTPUT
           echo "START_TIME=$(date)" >> "$GITHUB_OUTPUT"
+
+          # Remove the response file
+          rm -rf ${ISSUE_NUMB}-response.json
