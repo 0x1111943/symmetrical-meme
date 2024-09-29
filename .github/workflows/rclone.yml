@@ -62,9 +62,9 @@ jobs:
     if: needs.pre_sync.result == 'success'
     outputs:
       rclone_log_artifact: ${{ steps.storage_log.outputs.artifact-id }}
-      ipa_size: ${{ steps.upload_file.outputs.IPA_SIZE }}
-      ipa_file: ${{ steps.upload_file.outputs.IPA_FILE }}
-      md5_checksum: ${{ steps.upload_file.outputs.MD5_CHECKSUM }}
+      ipa_size: ${{ steps.file_details.outputs.IPA_SIZE }}
+      ipa_file: ${{ steps.file_details.outputs.IPA_FILE }}
+      md5_checksum: ${{ steps.file_details.outputs.MD5_CHECKSUM }}
     steps:
       - name: Setup Rclone action
         uses: AnimMouse/setup-rclone@v1
