@@ -1,0 +1,281 @@
+# Use rclone for syncing files to a remote server
+name: Rclone Sync
+
+on:
+  # push:
+  #   branches:
+  #     - main
+
+  issues:
+    types: [opened, closed]
+
+jobs:
+  pre_sync:
+    runs-on: ubuntu-latest
+    if: github.event.issue.user.login == '0x1111943'
+    outputs:
+      rclone_args: ${{ steps.extract.outputs.RCLONE_ARGS }}
+      rclone_src: ${{ steps.extract.outputs.RCLONE_SRC }}
+      rclone_dest: ${{ steps.extract.outputs.RCLONE_DEST }}
+    steps:
+      - id: extract
+        name: Extract data from issue body
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          # Extract rclone command from issue body. It always is first line
+          cmd=$(echo "$ISSUE_BODY" | head -n 1)
+
+          # remove leading and trailing whitespaces
+          cmd=$(echo "$cmd" | xargs)
+
+          # Extract src and dest from cmd. Split by space and get first and second element
+          src=$(echo "${cmd}" | awk '{print $1}')
+          src=$(echo "$src" | xargs)
+          dest=$(echo "${cmd}" | awk '{print $2}')
+          dest=$(echo "$dest" | xargs)
+
+          # Set the rclone command as an environment variable
+          echo "RCLONE_ARGS=${cmd}" >> "$GITHUB_OUTPUT"
+          echo "RCLONE_SRC=${src}" >> "$GITHUB_OUTPUT"
+          echo "RCLONE_DEST=${dest}" >> "$GITHUB_OUTPUT"
+
+  job_inprogress:
+    runs-on: ubuntu-latest
+    needs: pre_sync
+    if: needs.pre_sync.result == 'success'
+    permissions:
+      issues: write
+    steps:
+      - id: issue_inprogress
+        name: Add InProgress label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMB: ${{ github.event.issue.number }}
+        run: |
+          gh issue edit "$ISSUE_NUMB" --add-label "InProgress"
+
+  sync:
+    runs-on: ubuntu-latest
+    needs: [pre_sync, discord_notice]
+    if: needs.pre_sync.result == 'success'
+    outputs:
+      rclone_log_artifact: ${{ steps.storage_log.outputs.artifact-id }}
+      ipa_size: ${{ steps.upload_file.outputs.IPA_SIZE }}
+      ipa_file: ${{ steps.upload_file.outputs.IPA_FILE }}
+      md5_checksum: ${{ steps.upload_file.outputs.MD5_CHECKSUM }}
+    steps:
+      - name: Setup Rclone action
+        uses: AnimMouse/setup-rclone@v1
+        with:
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          version: v1.64.0
+
+      - name: Post to Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          MESSAGE_ID: ${{ needs.discord_notice.outputs.message_id }}
+        run: |
+          URL="${DISCORD_WEBHOOK}/messages/${MESSAGE_ID}"
+          message_data=$(curl -s -X GET -H "Content-Type: application/json" "${URL}")
+          message_data=$(echo "$message_data" | jq '.embeds[0].fields[1].value = "In Progress"')
+          message_data=$(echo "$message_data" | jq '.embeds[0].fields[2].value = "Syncing files"')
+          message_data=$(echo "$message_data" | jq '.embeds[0].color = 15970637')
+
+          # Send message to Discord
+          curl -X PATCH -H "Content-Type: application/json" -d "${message_data}" "${URL}"
+
+      - id: download_file
+        name: Download file
+        continue-on-error: true
+        timeout-minutes: 60
+        env:
+          RCLONE_SRC: ${{ needs.pre_sync.outputs.rclone_src }}
+        run: |
+          rclone copy --log-level=ERROR --log-file=rclone.out --transfers=8 ${RCLONE_SRC} .
+
+          # get .ipa file in current dir
+          ipa_file=$(ls -1 *.ipa | head -n 1)
+
+          # remove leading and trailing whitespaces for ipa_file
+          ipa_file=$(echo "$ipa_file" | xargs)
+
+          # Set the ipa file as an environment variable
+          echo "IPA_FILE=${ipa_file}" >> "$GITHUB_ENV"
+
+      - id: upload_file
+        name: Upload IPA file to R2
+        continue-on-error: true
+        timeout-minutes: 90
+        env:
+          RCLONE_DEST: ${{ needs.pre_sync.outputs.rclone_dest }}
+          MESSAGE_ID: ${{ needs.discord_notice.outputs.message_id }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          # Send message to Discord
+          URL="${DISCORD_WEBHOOK}/messages/${MESSAGE_ID}"
+          message_data=$(curl -s -X GET -H "Content-Type: application/json" "${URL}")
+          message_data=$(echo "$message_data" | jq '.embeds[0].fields[2].value = "Uploading files"')
+          message_data=$(echo "$message_data" | jq '.embeds[0].color = 15966243')
+
+          # Send message to Discord
+          curl -X PATCH -H "Content-Type: application/json" -d "${message_data}" "${URL}"
+
+          rclone_dest=$(echo "${RCLONE_DEST}" | xargs)
+
+          # Upload IPA file to R2
+          rclone copy --log-level=ERROR --log-file=rclone.out --transfers=1 --no-check-dest --refresh-times --delete-before --s3-upload-concurrency=1 ${IPA_FILE} ${rclone_dest}
+
+          # remove carriage return in rclone_dest
+          rclone_dest=$(echo "$rclone_dest" | tr -d '\r')
+          ipa_path=$(echo "${rclone_dest}/${IPA_FILE}" | xargs)
+          rclone hashsum md5 --output-file=checksum.md5 ${ipa_path}
+
+          # get ipa file size as KB
+          ipa_size=$(du -k ${IPA_FILE} | awk '{print $1}')
+          ipa_size=$(echo "$ipa_size" | xargs)
+
+          echo "MD5_CHECKSUM=$(cat checksum.md5)" >> "$GITHUB_OUTPUT"
+          echo "IPA_SIZE=${ipa_size}" >> "$GITHUB_OUTPUT"
+          echo "IPA_FILE=${IPA_FILE}" >> "$GITHUB_OUTPUT"
+
+      - id: storage_log
+        name: Archive rclone log
+        uses: actions/upload-artifact@v4
+        with:
+          name: rclone-log
+          path: rclone.out
+          if-no-files-found: "ignore"
+          retention-days: 1
+
+  # Hooks for issue
+  job_completed:
+    runs-on: ubuntu-latest
+    needs: [pre_sync, discord_notice, sync]
+    permissions:
+      issues: write
+    steps:
+      - id: sync_success
+        name: Sync success
+        if: ${{ success() && needs.sync.result == 'success' }}
+        run: |
+          gh issue edit "$ISSUE_NUMB" --remove-label "InProgress"
+
+          # Add comment to issue
+          echo -e "| Result | Sync completed successfully. |\n| -- | -- |\n| File size | ${IPA_SIZE} KB |\n| File name | ${IPA_FILE} |\n| Checksum | md5:${MD5_CHECKSUM} |" > issue.body
+          gh issue comment "$ISSUE_NUMB" -F issue.body
+
+          # close issue
+          gh issue edit "$ISSUE_NUMB" --add-label "Completed"
+          gh issue close "$ISSUE_NUMB" -r "completed"
+
+          # Post to Discord
+          RUNNING_TIME=$(echo "$(date +%s) - $(date -d "$START_TIME" +%s)" | bc)
+          URL="${DISCORD_WEBHOOK}/messages/${MESSAGE_ID}"
+          message_data=$(curl -s -X GET -H "Content-Type: application/json" "${URL}")
+          message_data=$(echo "$message_data" | jq '.embeds[0].fields[1].value = "Completed"')
+          message_data=$(echo "$message_data" | jq '.embeds[0].fields[2].value = "Sync completed successfully. Run in RUNNING_TIME seconds"')
+          message_data=$(echo "$message_data" | sed "s/RUNNING_TIME/${RUNNING_TIME}/g")
+          message_data=$(echo "$message_data" | jq '.embeds[0].color = 53900')
+
+          # Send message to Discord
+          curl -X PATCH -H "Content-Type: application/json" -d "${message_data}" "${URL}"
+
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMB: ${{ github.event.issue.number }}
+          RUN_NUMB: ${{ github.run_number }}
+          IPA_SIZE: ${{ needs.sync.outputs.ipa_size }}
+          IPA_FILE: ${{ needs.sync.outputs.ipa_file }}
+          MD5_CHECKSUM: ${{ needs.sync.outputs.md5_checksum }}
+          MESSAGE_ID: ${{ needs.discord_notice.outputs.message_id }}
+          START_TIME: ${{ needs.discord_notice.outputs.start_time }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+
+  job_failed:
+    runs-on: ubuntu-latest
+    needs: [discord_notice, sync]
+    if: needs.sync.result == 'failure'
+    permissions:
+      issues: write
+    steps:
+      - name: Download rclone log
+        uses: actions/download-artifact@v4
+        with:
+          name: rclone-log
+
+      - name: Add Comment to issue
+        run: |
+          # Add comment to issue
+          gh issue comment "$ISSUE_NUMB" -F rclone.out
+
+          # Add label to issue
+          gh issue edit "$ISSUE_NUMB" --add-label "Failed"
+
+          # remove InProgress label
+          gh issue edit "$ISSUE_NUMB" --remove-label "InProgress"
+
+          # error is first line of rclone.out
+          ERR_MESSAGE=$(head -n 1 rclone.out)
+
+          # Post to Discord
+          RUNNING_TIME=$(echo "$(date +%s) - $(date -d "$START_TIME" +%s)" | bc)
+          URL="${DISCORD_WEBHOOK}/messages/${MESSAGE_ID}"
+          message_data=$(curl -s -X GET -H "Content-Type: application/json" "${URL}")
+          message_data=$(echo "$message_data" | jq '.embeds[0].fields[1].value = "Failed"')
+          message_data=$(echo "$message_data" | jq '.embeds[0].fields[2].value = "Running time: RUNNING_TIME seconds. ${ERR_MESSAGE}"')
+          message_data=$(echo "$message_data" | sed "s/RUNNING_TIME/${RUNNING_TIME}/g")
+          message_data=$(echo "$message_data" | jq '.embeds[0].color = 14826496')
+
+          # Send message to Discord
+          curl -X PATCH -H "Content-Type: application/json" -d "${message_data}" "${URL}"
+
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMB: ${{ github.event.issue.number }}
+          MESSAGE_ID: ${{ needs.discord_notice.outputs.message_id }}
+          START_TIME: ${{ needs.discord_notice.outputs.start_time }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+
+  discord_notice:
+    runs-on: ubuntu-latest
+    if: github.event.issue.user.login == '0x1111943'
+    outputs:
+      message_id: ${{ steps.post_to_discord.outputs.MESSAGE_ID }}
+      start_time: ${{ steps.post_to_discord.outputs.START_TIME }}
+    env:
+      DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+    steps:
+      - id: post_to_discord
+        name: Post to Discord
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          APP_NAME=$(echo "$ISSUE_TITLE" | grep -oP '(?<=Request Premier for ).*(?=-)')
+          APP_NAME=$(echo "$APP_NAME" | sed "s/'/\\\'/g" | xargs)
+          APP_ID=$(echo "$ISSUE_BODY" | grep -oP '(?<=App Id \| ).*(?=\|)' | xargs)
+          USER_ID=$(echo "$ISSUE_BODY" | grep -oP '(?<=User ID \| ).*(?=\|)' | xargs)
+
+          MESSAGE_DATA="{\"content\":\"${ISSUE_TITLE}\",\"components\":[{\"type\":1,\"components\":[{\"type\":2,\"label\":\"Decrypt link\",\"url\":\"https://decrypt.day/app/${APP_ID}\",\"style\":5}]}],\"embeds\":[{\"title\":\"${APP_NAME}\",\"type\":\"rich\",\"thumbnail\":{\"url\":\"https://decrypt.day/app/${APP_ID}/icon\",\"with\":128,\"height\":128},\"url\":\"https://decrypt.day/app/${APP_ID}\",\"fields\":[{\"name\":\"UserID\",\"value\":\"${USER_ID}\"},{\"name\":\"State\",\"value\":\"New\",\"inline\":true},{\"name\":\"Note\",\"value\":\"Unknown\"}]}]}"
+
+          # print message data
+          echo "$MESSAGE_DATA"
+
+          # Send message to Discord
+          curl -X POST -H "Content-Type: application/json" -d "${MESSAGE_DATA}" "${DISCORD_WEBHOOK}?wait=true" > response.json
+
+          # Print the response
+          cat response.json
+
+          # Get the message id from the response
+          MESSAGE_ID=$(jq -r '.id' response.json)
+
+          # Set the message id as an output variable
+          echo "MESSAGE_ID=${MESSAGE_ID}" >> "$GITHUB_OUTPUT"
+
+          # Add current timestamp to GITHUB_OUTPUT
+          echo "START_TIME=$(date)" >> "$GITHUB_OUTPUT"
