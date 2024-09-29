@@ -127,7 +127,7 @@ jobs:
           rclone size --json ${ipa_path} > ${ISSUE_NUMB}-file.info
 
           echo "MD5_CHECKSUM=$(cat ${ISSUE_NUMB}-checksum.md5)" >> "$GITHUB_OUTPUT"
-          echo "IPA_SIZE=$(jq -r '.id' ${ISSUE_NUMB}-file.info)" >> "$GITHUB_OUTPUT"
+          echo "IPA_SIZE=$(jq -r '.bytes' ${ISSUE_NUMB}-file.info)" >> "$GITHUB_OUTPUT"
           echo "IPA_FILE=${IPA_FILE}" >> "$GITHUB_OUTPUT"
 
           # remove checksum and file.info
