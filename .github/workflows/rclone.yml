@@ -124,11 +124,7 @@ jobs:
           rclone_dest=$(echo "$rclone_dest" | tr -d '\r')
           ipa_path=$(echo "${rclone_dest}/${IPA_FILE}" | xargs)
           rclone hashsum md5 --output-file=${ISSUE_NUMB}-checksum.md5 ${ipa_path}
-          rm -rf file.info; rclone size --json ${ipa_path} > ${ISSUE_NUMB}-file.info
-
-          # get ipa file size as KB
-          ipa_size=$(du -k ${IPA_FILE} | awk '{print $1}')
-          ipa_size=$(echo "$ipa_size" | xargs)
+          rclone size --json ${ipa_path} > ${ISSUE_NUMB}-file.info
 
           echo "MD5_CHECKSUM=$(cat ${ISSUE_NUMB}-checksum.md5)" >> "$GITHUB_OUTPUT"
           echo "IPA_SIZE=$(jq -r '.id' ${ISSUE_NUMB}-file.info)" >> "$GITHUB_OUTPUT"
