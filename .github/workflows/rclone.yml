@@ -86,17 +86,22 @@ jobs:
           # Send message to Discord
           curl -X PATCH -H "Content-Type: application/json" -d "${message_data}" "${URL}"
 
-      - id: download_file
-        name: Download file
+      - id: sync_file
+        name: Sync file to R2
         continue-on-error: true
         timeout-minutes: 60
         env:
           RCLONE_SRC: ${{ needs.pre_sync.outputs.rclone_src }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
-          rclone copy --log-level=ERROR --log-file=rclone.out --transfers=8 ${RCLONE_SRC} .
+          # Extract rclone command from issue body. It always is first line
+          cmd=$(echo "$ISSUE_BODY" | head -n 1)
+          ipa_file=$(echo "$ISSUE_BODY" | grep -oP '(?<=Filename \| ).*(?=\|)' | xargs)
 
-          # get .ipa file in current dir
-          ipa_file=$(ls -1 *.ipa | head -n 1)
+          # remove leading and trailing whitespaces
+          cmd=$(echo "$cmd" | xargs)
+
+          rclone copy --log-level=ERROR --log-file=rclone.out --no-check-dest --refresh-times --delete-before --transfers=8 ${cmd}
 
           # remove leading and trailing whitespaces for ipa_file
           ipa_file=$(echo "$ipa_file" | xargs)
@@ -104,40 +109,28 @@ jobs:
           # Set the ipa file as an environment variable
           echo "IPA_FILE=${ipa_file}" >> "$GITHUB_ENV"
 
-      - id: upload_file
-        name: Upload IPA file to R2
+      - id: file_details
+        name: Get file details
         continue-on-error: true
         timeout-minutes: 90
         env:
           RCLONE_DEST: ${{ needs.pre_sync.outputs.rclone_dest }}
           MESSAGE_ID: ${{ needs.discord_notice.outputs.message_id }}
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
-          # Send message to Discord
-          URL="${DISCORD_WEBHOOK}/messages/${MESSAGE_ID}"
-          message_data=$(curl -s -X GET -H "Content-Type: application/json" "${URL}")
-          message_data=$(echo "$message_data" | jq '.embeds[0].fields[2].value = "Uploading files"')
-          message_data=$(echo "$message_data" | jq '.embeds[0].color = 15966243')
-
-          # Send message to Discord
-          curl -X PATCH -H "Content-Type: application/json" -d "${message_data}" "${URL}"
-
           rclone_dest=$(echo "${RCLONE_DEST}" | xargs)
-
-          # Upload IPA file to R2
-          rclone copy --log-level=ERROR --log-file=rclone.out --transfers=1 --no-check-dest --refresh-times --delete-before --s3-upload-concurrency=1 ${IPA_FILE} ${rclone_dest}
 
           # remove carriage return in rclone_dest
           rclone_dest=$(echo "$rclone_dest" | tr -d '\r')
           ipa_path=$(echo "${rclone_dest}/${IPA_FILE}" | xargs)
           rclone hashsum md5 --output-file=checksum.md5 ${ipa_path}
+          rm -rf file.info; rclone size --json ${ipa_path} > file.info 
 
           # get ipa file size as KB
           ipa_size=$(du -k ${IPA_FILE} | awk '{print $1}')
           ipa_size=$(echo "$ipa_size" | xargs)
 
           echo "MD5_CHECKSUM=$(cat checksum.md5)" >> "$GITHUB_OUTPUT"
-          echo "IPA_SIZE=${ipa_size}" >> "$GITHUB_OUTPUT"
+          echo "IPA_SIZE=$(jq -r '.id' file.info)" >> "$GITHUB_OUTPUT"
           echo "IPA_FILE=${IPA_FILE}" >> "$GITHUB_OUTPUT"
 
       - id: storage_log
