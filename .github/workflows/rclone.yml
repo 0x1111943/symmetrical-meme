@@ -11,7 +11,7 @@ on:
 
 jobs:
   pre_sync:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     if: github.event.issue.user.login == '0x1111943'
     outputs:
       rclone_args: ${{ steps.extract.outputs.RCLONE_ARGS }}
@@ -41,7 +41,7 @@ jobs:
           echo "RCLONE_DEST=${dest}" >> "$GITHUB_OUTPUT"
 
   job_inprogress:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: pre_sync
     if: needs.pre_sync.result == 'success'
     permissions:
@@ -57,7 +57,7 @@ jobs:
           gh issue edit "$ISSUE_NUMB" --add-label "InProgress"
 
   sync:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: [pre_sync, discord_notice]
     if: needs.pre_sync.result == 'success'
     outputs:
@@ -151,7 +151,7 @@ jobs:
 
   # Hooks for issue
   job_completed:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: [pre_sync, discord_notice, sync]
     permissions:
       issues: write
@@ -195,7 +195,7 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
 
   job_failed:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: [discord_notice, sync]
     if: needs.sync.result == 'failure'
     permissions:
@@ -241,7 +241,7 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
 
   discord_notice:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     if: github.event.issue.user.login == '0x1111943'
     outputs:
       message_id: ${{ steps.post_to_discord.outputs.MESSAGE_ID }}
